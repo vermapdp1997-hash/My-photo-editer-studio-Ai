@@ -1,0 +1,20 @@
+MY PHOTO EDITOR AI - ON-DEVICE AI MODELS & OPEN-SOURCE ATTRIBUTION
+==================================================================
+
+1. Real-ESRGAN-General-x4v3 (Photo Enhancer & Old Photo Restoration)
+   Source: xinntao/Real-ESRGAN / Qualcomm AI Hub Models
+   License: BSD-3-Clause
+   SHA-256: 4fc65b68a3e5d4bfa97bc6e9c51cfa9ab7dc579a4486613abc00ecf68e1864f0
+
+2. AOT-GAN (Object Eraser / Local Inpainting)
+   Source: researchmm/AOT-GAN-for-Inpainting / Qualcomm AI Hub Models
+   License: MIT License
+   SHA-256: f1dfc75f2ba4d87af6f173d3ba704b5f89860c88dd60620bf050d5c06f055411
+
+3. DDColor (Black & White Photo Colorization)
+   Source: piddnad/DDColor / Qualcomm AI Hub Models (w8a8 TFLite)
+   License: Apache-2.0
+
+4. Google ML Kit Selfie Segmentation & Face Detection (On-Device)
+   Used for: AI Background Remover, Portrait Blur, Face Retouch detection
+   License: Google APIs Terms of Service / On-Device ML Kit
