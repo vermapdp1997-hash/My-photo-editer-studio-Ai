@@ -1,0 +1,38 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.buildlog/
+.history
+.svn/
+migrate_working_dir/
+
+# IntelliJ / Android Studio / VS Code
+*.iml
+*.ipr
+*.iws
+.idea/
+.vscode/
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+/build/
+
+# Android / Signing Secrets (Never commit private keys)
+android/app/debug.keystore
+android/app/release.keystore
+android/key.properties
+*.jks
+*.keystore
+env.json
+
+# Downloaded Large Binary AI Models (fetched automatically in CI)
+assets/ai_models/*.tflite
