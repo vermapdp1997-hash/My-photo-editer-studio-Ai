@@ -1,0 +1,136 @@
+name: Build My Photo Editor AI (APK & AAB)
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build_android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check if Flutter source is ready
+        id: check_src
+        run: |
+          if [ -f "lib/main.dart" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "lib/main.dart not added yet. Skipping build until code setup completes."
+          fi
+
+      - name: Set up Java 17
+        if: steps.check_src.outputs.ready == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter (Stable)
+        if: steps.check_src.outputs.ready == 'true'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Download & verify open-source TFLite AI models
+        if: steps.check_src.outputs.ready == 'true'
+        run: |
+          mkdir -p assets/ai_models
+
+          echo "Downloading Real-ESRGAN-General-x4v3.tflite..."
+          curl -fL --retry 3 -o assets/ai_models/real_esrgan.tflite \
+            "https://huggingface.co/qualcomm/Real-ESRGAN-General-x4v3/resolve/3d27055d1553be0f17308c002f912a6ce954ea74/Real-ESRGAN-General-x4v3.tflite"
+          echo "4fc65b68a3e5d4bfa97bc6e9c51cfa9ab7dc579a4486613abc00ecf68e1864f0  assets/ai_models/real_esrgan.tflite" | sha256sum -c -
+
+          echo "Downloading AOT-GAN.tflite..."
+          curl -fL --retry 3 -o assets/ai_models/aot_gan.tflite \
+            "https://huggingface.co/qualcomm/AOT-GAN/resolve/ecdde1361b3687fb82bae00da6a5cca4f56718d5/AOT-GAN.tflite"
+          echo "f1dfc75f2ba4d87af6f173d3ba704b5f89860c88dd60620bf050d5c06f055411  assets/ai_models/aot_gan.tflite" | sha256sum -c -
+
+          echo "Downloading DDColor (w8a8 TFLite)..."
+          if curl -fL --retry 3 -o /tmp/ddcolor.zip \
+            "https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-models/models/ddcolor/releases/v0.66.0/ddcolor-tflite-w8a8.zip"; then
+            unzip -o -j /tmp/ddcolor.zip "*.tflite" -d /tmp/ddcolor_out || true
+            FOUND_DDCOLOR=$(find /tmp/ddcolor_out -name "*.tflite" | head -n 1 || true)
+            if [ -n "$FOUND_DDCOLOR" ] && [ -s "$FOUND_DDCOLOR" ]; then
+              mv "$FOUND_DDCOLOR" assets/ai_models/ddcolor.tflite
+            fi
+          else
+            echo "Warning: DDColor model download failed; app will gracefully mark colorization unavailable."
+          fi
+
+          ls -lh assets/ai_models/
+
+      - name: Generate missing Flutter Android Gradle wrapper & resources
+        if: steps.check_src.outputs.ready == 'true'
+        run: |
+          flutter create --platforms=android --org com.myphotoeditor.ai --project-name my_photo_editor_ai /tmp/scaffold
+          cp -rn /tmp/scaffold/android/. android/
+
+          # Sync kotlin-android plugin declaration if scaffold expects it
+          if grep -q 'id("kotlin-android")' /tmp/scaffold/android/app/build.gradle.kts; then
+            if ! grep -q 'id("kotlin-android")' android/app/build.gradle.kts; then
+              sed -i 's/id("com.android.application")/id("com.android.application")\n    id("kotlin-android")/' android/app/build.gradle.kts
+            fi
+          fi
+
+      - name: Configure optional Play Store Release Keystore from Secrets
+        if: steps.check_src.outputs.ready == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEY_ALIAS" ]; then
+            echo "$KEYSTORE_BASE64" | base64 --decode > android/app/release.keystore
+            cat <<EOF > android/key.properties
+          storePassword=$STORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=release.keystore
+          EOF
+            echo "Production release keystore configured."
+          else
+            echo "No release keystore secret found; building with debug signing for testing."
+          fi
+
+      - name: Install Flutter dependencies
+        if: steps.check_src.outputs.ready == 'true'
+        run: flutter pub get
+
+      - name: Run Flutter static analysis
+        if: steps.check_src.outputs.ready == 'true'
+        run: flutter analyze --no-fatal-infos
+
+      - name: Run Flutter unit & widget tests
+        if: steps.check_src.outputs.ready == 'true'
+        run: flutter test
+
+      - name: Build Release APK
+        if: steps.check_src.outputs.ready == 'true'
+        run: flutter build apk --release
+
+      - name: Build Play Store Release App Bundle (AAB)
+        if: steps.check_src.outputs.ready == 'true'
+        run: flutter build appbundle --release
+
+      - name: Upload Release APK Artifact
+        if: steps.check_src.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyPhotoEditorAI-Release-APK
+          path: build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Upload Play Store AAB Artifact
+        if: steps.check_src.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyPhotoEditorAI-PlayStore-AAB
+          path: build/app/outputs/bundle/release/app-release.aab
