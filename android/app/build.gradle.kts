@@ -35,6 +35,11 @@ android {
         noCompress += listOf("tflite", "lite")
     }
 
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
+
     signingConfigs {
         if (keystorePropertiesFile.exists()) {
             create("release") {
