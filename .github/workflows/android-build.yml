@@ -73,11 +73,39 @@ jobs:
           flutter create --platforms=android --org com.myphotoeditor.ai --project-name my_photo_editor_ai /tmp/scaffold
           cp -rn /tmp/scaffold/android/. android/
 
-          # Sync kotlin-android plugin declaration if scaffold expects it
           if grep -q 'id("kotlin-android")' /tmp/scaffold/android/app/build.gradle.kts; then
             if ! grep -q 'id("kotlin-android")' android/app/build.gradle.kts; then
               sed -i 's/id("com.android.application")/id("com.android.application")\n    id("kotlin-android")/' android/app/build.gradle.kts
             fi
+          fi
+
+          if ! grep -q "Align Java and Kotlin JVM target" android/build.gradle.kts; then
+            cat <<'EOF' >> android/build.gradle.kts
+
+          // Align Java and Kotlin JVM target across all Flutter plugins
+          gradle.projectsEvaluated {
+              subprojects {
+                  tasks.withType(JavaCompile::class.java).configureEach {
+                      sourceCompatibility = JavaVersion.VERSION_17.toString()
+                      targetCompatibility = JavaVersion.VERSION_17.toString()
+                  }
+                  tasks.matching { it.javaClass.name.contains("KotlinCompile") }.configureEach {
+                      try {
+                          val opts = javaClass.getMethod("getCompilerOptions").invoke(this)
+                          val jvmProp = opts.javaClass.getMethod("getJvmTarget").invoke(opts)
+                          val enumCls = Class.forName(
+                              "org.jetbrains.kotlin.gradle.dsl.JvmTarget",
+                              true,
+                              opts.javaClass.classLoader,
+                          )
+                          val jvm17 = enumCls.getMethod("valueOf", String::class.java).invoke(null, "JVM_17")
+                          jvmProp.javaClass.getMethod("set", Any::class.java).invoke(jvmProp, jvm17)
+                      } catch (_: Throwable) {
+                      }
+                  }
+              }
+          }
+          EOF
           fi
 
       - name: Configure optional Play Store Release Keystore from Secrets
