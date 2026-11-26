@@ -90,7 +90,7 @@ class ExportService {
         ext = 'png';
       case ExportFormat.webp:
         encodedBytes = Uint8List.fromList(
-          img.encodeWebP(rendered, quality: quality.toDouble()),
+          img.encodeWebP(rendered, quality: quality),
         );
         ext = 'webp';
       case ExportFormat.jpg:
