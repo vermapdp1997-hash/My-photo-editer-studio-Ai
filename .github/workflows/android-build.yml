@@ -50,10 +50,10 @@ jobs:
 
           echo "Downloading AOT-GAN.tflite..."
           curl -fL --retry 3 -o assets/ai_models/aot_gan.tflite \
-            "https://huggingface.co/qualcomm/AOT-GAN/resolve/ecdde1361b3687fb82bae00da6a5cca4f56718d5/AOT-GAN.tflite"
-          echo "f1dfc75f2ba4d87af6f173d3ba704b5f89860c88dd60620bf050d5c06f055411  assets/ai_models/aot_gan.tflite" | sha256sum -c -
+            "https://huggingface.co/qualcomm/AOT-GAN/resolve/f8b349b3f6e6a781d8fd7c17ee449300f2ba92b7/AOT-GAN.tflite"
+          echo "65882cbcd2e9b973dc6a12beda3be51ab8539533ba7688a938a4f94ca17be669  assets/ai_models/aot_gan.tflite" | sha256sum -c -
 
-          echo "Downloading DDColor (w8a8 TFLite)..."
+          echo "Downloading DDColor (optional w8a8 TFLite)..."
           if curl -fL --retry 3 -o /tmp/ddcolor.zip \
             "https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-models/models/ddcolor/releases/v0.66.0/ddcolor-tflite-w8a8.zip"; then
             unzip -o -j /tmp/ddcolor.zip "*.tflite" -d /tmp/ddcolor_out || true
@@ -62,7 +62,7 @@ jobs:
               mv "$FOUND_DDCOLOR" assets/ai_models/ddcolor.tflite
             fi
           else
-            echo "Warning: DDColor model download failed; app will gracefully mark colorization unavailable."
+            echo "Warning: DDColor w8a8 archive unavailable; app will mark colorization unavailable cleanly."
           fi
 
           ls -lh assets/ai_models/
