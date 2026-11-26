@@ -7,7 +7,6 @@ class AdMobService {
   AdMobService._();
   static final AdMobService instance = AdMobService._();
 
-  // Official Google AdMob Test Unit IDs (Replace before Play Store production release)
   static String get bannerUnitId => Platform.isAndroid
       ? 'ca-app-pub-3940256099942544/6300978111'
       : 'ca-app-pub-3940256099942544/2934735716';
@@ -20,48 +19,53 @@ class AdMobService {
       ? 'ca-app-pub-3940256099942544/5224354917'
       : 'ca-app-pub-3940256099942544/1712485313';
 
-  bool _initialized = false;
+  final ValueNotifier<bool> initializedNotifier = ValueNotifier<bool>(false);
+  bool get isInitialized => initializedNotifier.value;
+
   InterstitialAd? _interstitialAd;
   RewardedAd? _rewardedAd;
   DateTime? _lastInterstitialShownAt;
 
   Future<void> initialize() async {
-    if (_initialized) return;
+    if (initializedNotifier.value) return;
     try {
       await MobileAds.instance.initialize();
-      _initialized = true;
+      initializedNotifier.value = true;
       preloadInterstitial();
       preloadRewarded();
     } catch (_) {
-      // App works 100% offline even when Ads SDK cannot reach network
+      // App works 100% offline even when Ads SDK cannot initialize
     }
   }
 
   void preloadInterstitial() {
-    if (!_initialized) return;
-    InterstitialAd.load(
-      adUnitId: interstitialUnitId,
-      request: const AdRequest(),
-      adLoadCallback: InterstitialAdLoadCallback(
-        onAdLoaded: (ad) => _interstitialAd = ad,
-        onAdFailedToLoad: (_) => _interstitialAd = null,
-      ),
-    );
+    if (!isInitialized) return;
+    try {
+      InterstitialAd.load(
+        adUnitId: interstitialUnitId,
+        request: const AdRequest(),
+        adLoadCallback: InterstitialAdLoadCallback(
+          onAdLoaded: (ad) => _interstitialAd = ad,
+          onAdFailedToLoad: (_) => _interstitialAd = null,
+        ),
+      );
+    } catch (_) {}
   }
 
   void preloadRewarded() {
-    if (!_initialized) return;
-    RewardedAd.load(
-      adUnitId: rewardedUnitId,
-      request: const AdRequest(),
-      rewardedAdLoadCallback: RewardedAdLoadCallback(
-        onAdLoaded: (ad) => _rewardedAd = ad,
-        onAdFailedToLoad: (_) => _rewardedAd = null,
-      ),
-    );
+    if (!isInitialized) return;
+    try {
+      RewardedAd.load(
+        adUnitId: rewardedUnitId,
+        request: const AdRequest(),
+        rewardedAdLoadCallback: RewardedAdLoadCallback(
+          onAdLoaded: (ad) => _rewardedAd = ad,
+          onAdFailedToLoad: (_) => _rewardedAd = null,
+        ),
+      );
+    } catch (_) {}
   }
 
-  /// Shown ONLY after completing export — never interrupts active photo editing
   Future<void> showPostExportInterstitialIfReady() async {
     final ad = _interstitialAd;
     if (ad == null) {
@@ -131,7 +135,18 @@ class _SafeBannerAdWidgetState extends State<SafeBannerAdWidget> {
   @override
   void initState() {
     super.initState();
-    _loadBanner();
+    if (AdMobService.instance.isInitialized) {
+      _loadBanner();
+    } else {
+      AdMobService.instance.initializedNotifier.addListener(_onAdMobReady);
+    }
+  }
+
+  void _onAdMobReady() {
+    if (AdMobService.instance.isInitialized && mounted && _bannerAd == null) {
+      AdMobService.instance.initializedNotifier.removeListener(_onAdMobReady);
+      _loadBanner();
+    }
   }
 
   void _loadBanner() {
@@ -157,13 +172,12 @@ class _SafeBannerAdWidgetState extends State<SafeBannerAdWidget> {
       );
       _bannerAd = ad;
       ad.load();
-    } catch (_) {
-      // Silently collapse offline
-    }
+    } catch (_) {}
   }
 
   @override
   void dispose() {
+    AdMobService.instance.initializedNotifier.removeListener(_onAdMobReady);
     _bannerAd?.dispose();
     super.dispose();
   }
