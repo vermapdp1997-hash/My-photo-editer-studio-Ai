@@ -1,7 +1,5 @@
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:typed_data';
-import 'dart:ui' show Rect;
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
@@ -14,6 +12,7 @@ import 'package:tflite_flutter/tflite_flutter.dart';
 
 import '../../core/performance/performance_profile.dart';
 import '../../data/models/edit_state.dart';
+import 'tflite_tensor_utils.dart';
 
 class AiModelUnavailableException implements Exception {
   final String message;
@@ -136,30 +135,27 @@ class LocalAiService {
   Future<String> _makeTempOutputPath(String prefix, String ext) async {
     final dir = await getApplicationSupportDirectory();
     final aiDir = Directory(p.join(dir.path, 'ai_cache'));
-    if (!await aiDir.exists()) {
-      await aiDir.create(recursive: true);
-    }
+    if (!await aiDir.exists()) await aiDir.create(recursive: true);
     return p.join(
       aiDir.path,
       '${prefix}_${DateTime.now().microsecondsSinceEpoch}.$ext',
     );
   }
 
-  /// Real On-Device Person Segmentation via Google ML Kit
   Future<String> generatePersonSegmentationMask(String sourcePath) async {
     final segmenter = SelfieSegmenter(
       mode: SegmenterMode.single,
       enableRawSizeMask: false,
     );
     try {
-      final inputImage = InputImage.fromFilePath(sourcePath);
-      final mask = await segmenter.processImage(inputImage);
+      final mask = await segmenter.processImage(
+        InputImage.fromFilePath(sourcePath),
+      );
       if (mask == null || mask.confidences.isEmpty) {
         throw const AiModelUnavailableException(
-          'No subject segmentation mask could be generated for this photo.',
+          'No subject segmentation mask could be generated.',
         );
       }
-
       final maskImg = img.Image(
         width: mask.width,
         height: mask.height,
@@ -167,12 +163,11 @@ class LocalAiService {
       );
       for (int y = 0; y < mask.height; y++) {
         for (int x = 0; x < mask.width; x++) {
-          final conf = mask.confidences[y * mask.width + x].clamp(0.0, 1.0);
-          final v = (conf * 255).round();
+          final v = (mask.confidences[y * mask.width + x].clamp(0.0, 1.0) * 255)
+              .round();
           maskImg.setPixelRgba(x, y, v, v, v, 255);
         }
       }
-
       final outPath = await _makeTempOutputPath('seg_mask', 'png');
       await File(outPath).writeAsBytes(img.encodePng(maskImg), flush: true);
       return outPath;
@@ -181,38 +176,32 @@ class LocalAiService {
     }
   }
 
-  /// Real On-Device Face Detection + Localized Skin Smoothing & Brightening
   Future<String> retouchFacesOnDevice(
     String sourcePath, {
     double intensity = 0.6,
   }) async {
     final detector = FaceDetector(
-      options: FaceDetectorOptions(
-        performanceMode: FaceDetectorMode.accurate,
-        enableLandmarks: false,
-        enableContours: false,
-      ),
+      options: FaceDetectorOptions(performanceMode: FaceDetectorMode.accurate),
     );
     try {
-      final inputImage = InputImage.fromFilePath(sourcePath);
-      final faces = await detector.processImage(inputImage);
+      final faces = await detector.processImage(
+        InputImage.fromFilePath(sourcePath),
+      );
       if (faces.isEmpty) {
         throw const AiModelUnavailableException(
           'No faces detected by on-device ML Kit Face Detector.',
         );
       }
-
-      final bytes = await File(sourcePath).readAsBytes();
-      final decoded = img.decodeImage(bytes);
+      final decoded = img.decodeImage(await File(sourcePath).readAsBytes());
       if (decoded == null) {
-        throw const AiModelUnavailableException('Could not decode photo for retouching.');
+        throw const AiModelUnavailableException('Could not decode photo.');
       }
       final work = img.bakeOrientation(decoded).convert(numChannels: 4);
-      final smoothLayer = img.gaussianBlur(img.Image.from(work), radius: 5);
+      final smooth = img.gaussianBlur(img.Image.from(work), radius: 5);
       final amount = intensity.clamp(0.1, 1.0);
 
       for (final face in faces) {
-        final Rect box = face.boundingBox;
+        final box = face.boundingBox;
         final x0 = math.max(0, box.left.round());
         final y0 = math.max(0, box.top.round());
         final x1 = math.min(work.width - 1, box.right.round());
@@ -228,35 +217,27 @@ class LocalAiService {
             final dx = (x - cx) / rx;
             final ellip = dx * dx + dy * dy;
             if (ellip > 1.0) continue;
-
             final op = work.getPixel(x, y);
-            final sp = smoothLayer.getPixel(x, y);
-
-            // Preserve sharp edges (eyes, brows, lips, hair) while smoothing skin patches
+            final sp = smooth.getPixel(x, y);
             final diff = ((op.r - sp.r).abs() +
                     (op.g - sp.g).abs() +
                     (op.b - sp.b).abs()) /
                 3.0;
-            final edgePreservation = (1.0 - (diff / 34.0)).clamp(0.0, 1.0);
-            final radialWeight = (1.0 - ellip).clamp(0.0, 1.0);
-            final blend = amount * 0.65 * edgePreservation * radialWeight;
-            final brightLift = 1.0 + (amount * 0.06 * radialWeight);
-
-            final r = ((op.r * (1 - blend) + sp.r * blend) * brightLift)
-                .clamp(0, 255)
-                .round();
-            final g = ((op.g * (1 - blend) + sp.g * blend) * brightLift)
-                .clamp(0, 255)
-                .round();
-            final b = ((op.b * (1 - blend) + sp.b * blend) * brightLift)
-                .clamp(0, 255)
-                .round();
-
-            work.setPixelRgba(x, y, r, g, b, op.a.round());
+            final edge = (1.0 - (diff / 34.0)).clamp(0.0, 1.0);
+            final radial = (1.0 - ellip).clamp(0.0, 1.0);
+            final blend = amount * 0.65 * edge * radial;
+            final lift = 1.0 + (amount * 0.06 * radial);
+            work.setPixelRgba(
+              x,
+              y,
+              ((op.r * (1 - blend) + sp.r * blend) * lift).clamp(0, 255).round(),
+              ((op.g * (1 - blend) + sp.g * blend) * lift).clamp(0, 255).round(),
+              ((op.b * (1 - blend) + sp.b * blend) * lift).clamp(0, 255).round(),
+              op.a.round(),
+            );
           }
         }
       }
-
       final outPath = await _makeTempOutputPath('face_retouch', 'png');
       await File(outPath).writeAsBytes(img.encodePng(work), flush: true);
       return outPath;
@@ -269,35 +250,25 @@ class LocalAiService {
     PerformanceConfig config, {
     String? expectedSha,
   }) async {
-    ByteData data;
+    final ByteData data;
     try {
       data = await rootBundle.load(assetPath);
     } catch (_) {
       throw AiModelUnavailableException(
-        'On-device AI model ($assetPath) is not bundled or unavailable.',
+        'On-device AI model ($assetPath) is unavailable.',
       );
     }
-
     final bytes = data.buffer.asUint8List();
     if (bytes.length < 1024) {
-      throw AiModelUnavailableException(
-        'On-device AI model ($assetPath) is incomplete.',
-      );
+      throw AiModelUnavailableException('Model ($assetPath) is incomplete.');
     }
-    if (expectedSha != null) {
-      final digest = sha256.convert(bytes).toString();
-      if (digest != expectedSha) {
-        throw AiModelUnavailableException(
-          'Checksum verification failed for $assetPath.',
-        );
-      }
+    if (expectedSha != null && sha256.convert(bytes).toString() != expectedSha) {
+      throw AiModelUnavailableException('Checksum mismatch for $assetPath.');
     }
-
     final options = InterpreterOptions()..threads = config.interpreterThreads;
     return Interpreter.fromAsset(assetPath, options: options);
   }
 
-  /// Real-ESRGAN TFLite Enhancement & Old Photo Restoration
   Future<String> enhanceOrRestoreWithRealEsrgan(
     String sourcePath,
     PerformanceConfig config, {
@@ -309,64 +280,38 @@ class LocalAiService {
       expectedSha: esrganExpectedSha256,
     );
     try {
-      final rawBytes = await File(sourcePath).readAsBytes();
-      final decoded = img.decodeImage(rawBytes);
+      final decoded = img.decodeImage(await File(sourcePath).readAsBytes());
       if (decoded == null) {
-        throw const AiModelUnavailableException('Could not decode input image.');
+        throw const AiModelUnavailableException('Could not decode image.');
       }
-      var work = img.bakeOrientation(decoded).convert(numChannels: 4);
-
-      if (restoreMode) {
-        // Gentle pre-denoising for faded/scratched prints before neural super-resolution
-        final denoised = img.gaussianBlur(img.Image.from(work), radius: 1);
-        for (int y = 0; y < work.height; y++) {
-          for (int x = 0; x < work.width; x++) {
-            final a = work.getPixel(x, y);
-            final b = denoised.getPixel(x, y);
-            work.setPixelRgba(
-              x,
-              y,
-              (a.r * 0.7 + b.r * 0.3).round(),
-              (a.g * 0.7 + b.g * 0.3).round(),
-              (a.b * 0.7 + b.b * 0.3).round(),
-              255,
-            );
-          }
-        }
-      }
-
+      final work = img.bakeOrientation(decoded).convert(numChannels: 4);
       final inTensor = interpreter.getInputTensor(0);
       final outTensor = interpreter.getOutputTensor(0);
-      final inShape = inTensor.shape; // e.g. [1, H, W, 3] or [1, 3, H, W]
+      final inShape = inTensor.shape;
       final isNchw = inShape.length == 4 && inShape[1] == 3;
-      final modelH = isNchw ? inShape[2] : inShape[1];
-      final modelW = isNchw ? inShape[3] : inShape[2];
-
       final resizedIn = img.copyResize(
         work,
-        width: modelW,
-        height: modelH,
-        interpolation: img.Interpolation.linear,
+        width: isNchw ? inShape[3] : inShape[2],
+        height: isNchw ? inShape[2] : inShape[1],
       );
-
-      final inBuf = _imageToTensorBuffer(resizedIn, inTensor, isNchw: isNchw);
-      final outBuf = _allocateOutputBuffer(outTensor);
+      final inBuf = TfliteTensorUtils.imageToTensorBuffer(
+        resizedIn,
+        inTensor,
+        isNchw: isNchw,
+      );
+      final outBuf = TfliteTensorUtils.allocateOutputBuffer(outTensor);
       interpreter.run(inBuf, outBuf);
 
       final outShape = outTensor.shape;
-      final outIsNchw = outShape.length == 4 && outShape[1] == 3;
-      final outH = outIsNchw ? outShape[2] : outShape[1];
-      final outW = outIsNchw ? outShape[3] : outShape[2];
-
-      final enhancedPatch = _tensorBufferToImage(
+      final outNchw = outShape.length == 4 && outShape[1] == 3;
+      final patch = TfliteTensorUtils.tensorBufferToImage(
         outBuf,
         outTensor,
-        width: outW,
-        height: outH,
-        isNchw: outIsNchw,
+        width: outNchw ? outShape[3] : outShape[2],
+        height: outNchw ? outShape[2] : outShape[1],
+        isNchw: outNchw,
       );
 
-      // Fit enhanced neural output back to working resolution up to performance cap
       final targetMax = math.min(
         config.aiInputMaxDimension * 2,
         math.max(work.width, work.height),
@@ -374,26 +319,14 @@ class LocalAiService {
       final scale = targetMax / math.max(work.width, work.height);
       final finalW = scale < 1.0 ? (work.width * scale).round() : work.width;
       final finalH = scale < 1.0 ? (work.height * scale).round() : work.height;
+      final aiUp = img.copyResize(patch, width: finalW, height: finalH);
+      final base = img.copyResize(work, width: finalW, height: finalH);
 
-      final upscaledAi = img.copyResize(
-        enhancedPatch,
-        width: finalW,
-        height: finalH,
-        interpolation: img.Interpolation.cubic,
-      );
-      final baseScaled = img.copyResize(
-        work,
-        width: finalW,
-        height: finalH,
-        interpolation: img.Interpolation.linear,
-      );
-
-      // Preserve authentic identity by blending 75% AI output + 25% original texture
       for (int y = 0; y < finalH; y++) {
         for (int x = 0; x < finalW; x++) {
-          final ap = upscaledAi.getPixel(x, y);
-          final bp = baseScaled.getPixel(x, y);
-          baseScaled.setPixelRgba(
+          final ap = aiUp.getPixel(x, y);
+          final bp = base.getPixel(x, y);
+          base.setPixelRgba(
             x,
             y,
             (ap.r * 0.75 + bp.r * 0.25).round().clamp(0, 255),
@@ -403,92 +336,96 @@ class LocalAiService {
           );
         }
       }
-
       final outPath = await _makeTempOutputPath(
         restoreMode ? 'ai_restored' : 'ai_enhanced',
         'png',
       );
-      await File(outPath).writeAsBytes(img.encodePng(baseScaled), flush: true);
+      await File(outPath).writeAsBytes(img.encodePng(base), flush: true);
       return outPath;
     } finally {
       interpreter.close();
     }
   }
 
-  /// AOT-GAN Local TFLite Inpainting (Object Eraser)
   Future<String> eraseObjectWithAotGan(
     String sourcePath,
     List<RetouchStroke> maskStrokes,
     PerformanceConfig config,
   ) async {
     if (maskStrokes.isEmpty) {
-      throw const AiModelUnavailableException(
-        'Please brush over the object you want to erase first.',
-      );
+      throw const AiModelUnavailableException('Brush over an object first.');
     }
-
     final interpreter = await _openVerifiedInterpreter(
       aotGanAsset,
       config,
       expectedSha: aotGanExpectedSha256,
     );
     try {
-      final rawBytes = await File(sourcePath).readAsBytes();
-      final decoded = img.decodeImage(rawBytes);
+      final decoded = img.decodeImage(await File(sourcePath).readAsBytes());
       if (decoded == null) {
-        throw const AiModelUnavailableException('Could not decode input image.');
+        throw const AiModelUnavailableException('Could not decode image.');
       }
       final work = img.bakeOrientation(decoded).convert(numChannels: 4);
-
       final inTensor0 = interpreter.getInputTensor(0);
-      final inShape0 = inTensor0.shape;
-      final isNchw = inShape0.length == 4 &&
-          (inShape0[1] == 3 || inShape0[1] == 4);
-      final modelH = isNchw ? inShape0[2] : inShape0[1];
-      final modelW = isNchw ? inShape0[3] : inShape0[2];
-
+      final s0 = inTensor0.shape;
+      final isNchw = s0.length == 4 && (s0[1] == 3 || s0[1] == 4);
+      final modelH = isNchw ? s0[2] : s0[1];
+      final modelW = isNchw ? s0[3] : s0[2];
       final resized = img.copyResize(work, width: modelW, height: modelH);
-      final maskImg = _rasterizeMask(modelW, modelH, maskStrokes);
-
+      final maskImg = TfliteTensorUtils.rasterizeMask(
+        modelW,
+        modelH,
+        maskStrokes,
+      );
       final outTensor = interpreter.getOutputTensor(0);
-      final outBuf = _allocateOutputBuffer(outTensor);
+      final outBuf = TfliteTensorUtils.allocateOutputBuffer(outTensor);
 
-      final inputCount = interpreter.getInputTensors().length;
-      if (inputCount >= 2) {
-        final inTensor1 = interpreter.getInputTensor(1);
-        final imgBuf = _imageToTensorBuffer(resized, inTensor0, isNchw: isNchw);
-        final mBuf = _maskToTensorBuffer(maskImg, inTensor1);
-        interpreter.runForMultipleInputs([imgBuf, mBuf], {0: outBuf});
+      if (interpreter.getInputTensors().length >= 2) {
+        final in1 = interpreter.getInputTensor(1);
+        interpreter.runForMultipleInputs(
+          [
+            TfliteTensorUtils.imageToTensorBuffer(
+              resized,
+              inTensor0,
+              isNchw: isNchw,
+            ),
+            TfliteTensorUtils.maskToTensorBuffer(maskImg, in1),
+          ],
+          {0: outBuf},
+        );
       } else {
-        final imgBuf = _imageToTensorBuffer(resized, inTensor0, isNchw: isNchw);
-        interpreter.run(imgBuf, outBuf);
+        interpreter.run(
+          TfliteTensorUtils.imageToTensorBuffer(
+            resized,
+            inTensor0,
+            isNchw: isNchw,
+          ),
+          outBuf,
+        );
       }
 
-      final outShape = outTensor.shape;
-      final outIsNchw = outShape.length == 4 && outShape[1] == 3;
-      final repairedSmall = _tensorBufferToImage(
+      final os = outTensor.shape;
+      final outNchw = os.length == 4 && os[1] == 3;
+      final small = TfliteTensorUtils.tensorBufferToImage(
         outBuf,
         outTensor,
-        width: outIsNchw ? outShape[3] : outShape[2],
-        height: outIsNchw ? outShape[2] : outShape[1],
-        isNchw: outIsNchw,
+        width: outNchw ? os[3] : os[2],
+        height: outNchw ? os[2] : os[1],
+        isNchw: outNchw,
       );
-
-      final repairedFull = img.copyResize(
-        repairedSmall,
-        width: work.width,
-        height: work.height,
-        interpolation: img.Interpolation.linear,
+      final repaired =
+          img.copyResize(small, width: work.width, height: work.height);
+      final softMask = img.gaussianBlur(
+        TfliteTensorUtils.rasterizeMask(work.width, work.height, maskStrokes),
+        radius: 4,
       );
-      final fullMask = _rasterizeMask(work.width, work.height, maskStrokes);
-      final softMask = img.gaussianBlur(fullMask, radius: 4);
 
       for (int y = 0; y < work.height; y++) {
         for (int x = 0; x < work.width; x++) {
           final m = (softMask.getPixel(x, y).r / 255.0).clamp(0.0, 1.0);
           if (m <= 0.01) continue;
           final op = work.getPixel(x, y);
-          final rp = repairedFull.getPixel(x, y);
+          final rp = repaired.getPixel(x, y);
           work.setPixelRgba(
             x,
             y,
@@ -499,7 +436,6 @@ class LocalAiService {
           );
         }
       }
-
       final outPath = await _makeTempOutputPath('ai_erased', 'png');
       await File(outPath).writeAsBytes(img.encodePng(work), flush: true);
       return outPath;
@@ -508,68 +444,62 @@ class LocalAiService {
     }
   }
 
-  /// DDColor Local TFLite Photo Colorization (B&W -> Color)
   Future<String> colorizeWithDdColor(
     String sourcePath,
     PerformanceConfig config,
   ) async {
     final interpreter = await _openVerifiedInterpreter(ddColorAsset, config);
     try {
-      final rawBytes = await File(sourcePath).readAsBytes();
-      final decoded = img.decodeImage(rawBytes);
+      final decoded = img.decodeImage(await File(sourcePath).readAsBytes());
       if (decoded == null) {
-        throw const AiModelUnavailableException('Could not decode input image.');
+        throw const AiModelUnavailableException('Could not decode image.');
       }
       final work = img.bakeOrientation(decoded).convert(numChannels: 4);
-
-      final inTensor = interpreter.getInputTensor(0);
-      final outTensor = interpreter.getOutputTensor(0);
-      final inShape = inTensor.shape;
-      final isNchw = inShape.length == 4 && inShape[1] == 3;
-      final modelH = isNchw ? inShape[2] : inShape[1];
-      final modelW = isNchw ? inShape[3] : inShape[2];
-
-      final resized = img.copyResize(work, width: modelW, height: modelH);
-      final inBuf = _imageToTensorBuffer(resized, inTensor, isNchw: isNchw);
-      final outBuf = _allocateOutputBuffer(outTensor);
-      interpreter.run(inBuf, outBuf);
-
-      final outShape = outTensor.shape;
-      final outIsNchw = outShape.length == 4 && outShape[1] == 3;
-      final colorSmall = _tensorBufferToImage(
+      final inT = interpreter.getInputTensor(0);
+      final outT = interpreter.getOutputTensor(0);
+      final isNchw = inT.shape.length == 4 && inT.shape[1] == 3;
+      final resized = img.copyResize(
+        work,
+        width: isNchw ? inT.shape[3] : inT.shape[2],
+        height: isNchw ? inT.shape[2] : inT.shape[1],
+      );
+      final outBuf = TfliteTensorUtils.allocateOutputBuffer(outT);
+      interpreter.run(
+        TfliteTensorUtils.imageToTensorBuffer(resized, inT, isNchw: isNchw),
         outBuf,
-        outTensor,
-        width: outIsNchw ? outShape[3] : outShape[2],
-        height: outIsNchw ? outShape[2] : outShape[1],
-        isNchw: outIsNchw,
       );
 
+      final os = outT.shape;
+      final outNchw = os.length == 4 && os[1] == 3;
       final colorFull = img.copyResize(
-        colorSmall,
+        TfliteTensorUtils.tensorBufferToImage(
+          outBuf,
+          outT,
+          width: outNchw ? os[3] : os[2],
+          height: outNchw ? os[2] : os[1],
+          isNchw: outNchw,
+        ),
         width: work.width,
         height: work.height,
-        interpolation: img.Interpolation.linear,
       );
-
-      // Preserve crisp original B&W luminance while transferring AI predicted chrominance
       for (int y = 0; y < work.height; y++) {
         for (int x = 0; x < work.width; x++) {
           final op = work.getPixel(x, y);
           final cp = colorFull.getPixel(x, y);
-          final origY = 0.299 * op.r + 0.587 * op.g + 0.114 * op.b;
-          final predY = math.max(1.0, 0.299 * cp.r + 0.587 * cp.g + 0.114 * cp.b);
-          final scale = origY / predY;
+          final oy = 0.299 * op.r + 0.587 * op.g + 0.114 * op.b;
+          final py =
+              math.max(1.0, 0.299 * cp.r + 0.587 * cp.g + 0.114 * cp.b);
+          final s = oy / py;
           work.setPixelRgba(
             x,
             y,
-            (cp.r * scale).round().clamp(0, 255),
-            (cp.g * scale).round().clamp(0, 255),
-            (cp.b * scale).round().clamp(0, 255),
+            (cp.r * s).round().clamp(0, 255),
+            (cp.g * s).round().clamp(0, 255),
+            (cp.b * s).round().clamp(0, 255),
             255,
           );
         }
       }
-
       final outPath = await _makeTempOutputPath('ai_colorized', 'png');
       await File(outPath).writeAsBytes(img.encodePng(work), flush: true);
       return outPath;
@@ -577,5 +507,4 @@ class LocalAiService {
       interpreter.close();
     }
   }
-
-  img.Image _rasterizeMask(int width, i
+}
