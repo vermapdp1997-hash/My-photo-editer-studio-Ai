@@ -23,5 +23,12 @@ The included `.github/workflows/android-build.yml` automatically:
 
 ## Signed Production Release (Google Play Store)
 1. Generate an upload keystore locally:
-   ```bash
-   keytool -genkey -v -keystore release.keystore -alias upload -keyalg RSA -keysize 2048 -validity 10000
+
+       keytool -genkey -v -keystore release.keystore -alias upload -keyalg RSA -keysize 2048 -validity 10000
+
+2. Convert keystore to Base64 (`base64 -w 0 release.keystore`) and add these GitHub **Repository Secrets** (`Settings -> Secrets and variables -> Actions`):
+   - `KEYSTORE_BASE64`
+   - `KEY_ALIAS`
+   - `KEY_PASSWORD`
+   - `STORE_PASSWORD`
+3. Replace the test AdMob App ID in `android/app/src/main/AndroidManifest.xml` and test Ad Unit IDs in `lib/services/ads_service/admob_service.dart` with your real AdMob IDs before uploading the `.aab` to Google Play Console.
